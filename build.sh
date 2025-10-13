@@ -14,4 +14,4 @@ cmake .. -DAMGX_ROOT=/u/limo/amgx -DCMAKE_CUDA_ARCHITECTURES=80
 make 
 cd ..
 
-./build/test_amgx SOLVER_CONFIG.json iter
+./build/test_amgx SOLVER_CONFIG.json data
