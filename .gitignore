@@ -2,3 +2,4 @@ build/
 iter
 benchmark
 __MACOSX/
+.vscode

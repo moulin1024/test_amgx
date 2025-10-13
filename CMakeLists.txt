@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.20)
 project(test_amgx LANGUAGES CUDA CXX)
 
 # Let user specify AMGX_ROOT manually
@@ -7,8 +7,6 @@ set(AMGX_ROOT "" CACHE PATH "Path to AMGX installation root (containing include/
 if(NOT AMGX_ROOT)
     message(FATAL_ERROR "Please specify AMGX_ROOT, e.g. cmake -DAMGX_ROOT=/opt/amgx ..")
 endif()
-
-find_package(CUDA REQUIRED)
 
 set(AMGX_INCLUDE_DIR ${AMGX_ROOT}/include)
 set(AMGX_LIBRARY ${AMGX_ROOT}/lib/libamgxsh.so)

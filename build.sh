@@ -10,7 +10,7 @@ rm -rf build
 mkdir build
 cd build
 
-cmake .. -DAMGX_ROOT=/u/limo/amgx
+cmake .. -DAMGX_ROOT=/u/limo/amgx -DCMAKE_CUDA_ARCHITECTURES=80
 # cmake --build build -j
 make 
 cd ..
