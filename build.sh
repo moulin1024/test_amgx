@@ -11,10 +11,7 @@ mkdir build
 cd build
 
 cmake .. -DAMGX_ROOT=/u/limo/amgx -DCMAKE_CUDA_ARCHITECTURES=80
-# cmake --build build -j
 make 
 cd ..
 
-./build/test_amgx SOLVER_CONFIG.json data
-# export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-# ./build/sanity_amgx
+./build/test_amgx SOLVER_CONFIG.json iter
