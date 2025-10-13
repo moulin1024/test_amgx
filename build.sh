@@ -15,6 +15,6 @@ cmake .. -DAMGX_ROOT=/u/limo/amgx
 make 
 cd ..
 
-./build/test_amgx SOLVER_CONFIG.json iter
+./build/test_amgx SOLVER_CONFIG.json data
 # export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # ./build/sanity_amgx
