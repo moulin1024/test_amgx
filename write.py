@@ -6,10 +6,11 @@ import sys
 # Get data directory from input argument
 datadir = sys.argv[1]
 
-dataset0 = nc.Dataset(datadir + 'helmholtz_data_out.nc', 'r')
-hcsr = dataset0.groups['hcsr']
-dataset = nc.Dataset(datadir + 'helmholtz_data_out.nc', 'r')
-print(dataset)
+dataset0 = nc.Dataset(datadir + 'hcsrs.nc', 'r')
+print(dataset0)
+hcsr = dataset0.groups['hcsr_lvl001']
+dataset = nc.Dataset(datadir + 'helmholtz_data.nc', 'r')
+
 # Extract variables and convert masked arrays to regular numpy arrays
 row_ptr = np.array(hcsr.variables['i'][:]) - 1
 col_ind = np.array(hcsr.variables['j'][:]) - 1
@@ -35,13 +36,13 @@ diagonal_inverse = 1.0 / diagonal
 # Scale the matrix by the inverse diagonal (D^-1 * A)
 values_scaled = values.copy()  # Create a copy to preserve original values
 rhs_scaled = rhs.copy()
-for i in range(n):
-    values_scaled[row_ptr[i]:row_ptr[i+1]] *= diagonal_inverse[i]
-    rhs_scaled[i] *= diagonal_inverse[i]
+# for i in range(n):
+#     values_scaled[row_ptr[i]:row_ptr[i+1]] *= diagonal_inverse[i]
+#     rhs_scaled[i] *= diagonal_inverse[i]
 
-rhs_norm = np.linalg.norm(rhs_scaled)
-values_scaled /= rhs_norm
-rhs_scaled /= rhs_norm
+# rhs_norm = np.linalg.norm(rhs_scaled)
+# values_scaled /= rhs_norm
+# rhs_scaled /= rhs_norm
 # Write all arrays to binary files
 row_ptr.astype(np.int32).tofile(datadir + 'row_ptr.bin')
 col_ind.astype(np.int32).tofile(datadir + 'col_ind.bin')

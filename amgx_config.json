@@ -28,7 +28,7 @@
         "max_iters": 100, 
         "monitor_residual": 1,
         "store_res_history": 0, 
-        "convergence": "ABSOLUTE", 
+        "convergence": "RELATIVE_INI", 
         "scope": "main", 
         "tolerance" : 1e-10, 
         "norm": "L2"

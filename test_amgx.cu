@@ -10,6 +10,42 @@
 #include <cuda_runtime.h>
 #include <chrono>
 
+// ========================= Kernels =========================
+// Left scale: A <- D^{-1} A, b <- D^{-1} b
+// Left scale via Jacobi from CSR: A <- D^{-1} A, b <- D^{-1} b
+// Requires: row_ptr, col_ind, val (CSR) and rhs.
+// If a diagonal entry is missing or ~zero, the row is left unscaled (optional behavior).
+__global__ void jacobi_preconditioning(
+    int n,
+    const int* __restrict__ row_ptr,
+    const int* __restrict__ col_ind,
+    double* __restrict__ val,
+    double* __restrict__ rhs,
+    double eps /* e.g., 1e-30 to avoid 1/0 */)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    // Find diagonal a_ii
+    double aii = 0.0;
+    int start = row_ptr[i];
+    int end   = row_ptr[i + 1];
+    for (int jj = start; jj < end; ++jj) {
+        if (col_ind[jj] == i) { aii = val[jj]; break; }
+    }
+
+    // If diagonal is valid, scale row i and rhs[i]
+    if (fabs(aii) > eps) {
+        double s = 1.0 / aii;
+        for (int jj = start; jj < end; ++jj) {
+            val[jj] *= s;
+        }
+        rhs[i] *= s;
+    }
+    // else: diagonal missing or nearly zero -> skip scaling (or handle as you prefer)
+}
+
+
 // ---------- small helpers ----------
 template <typename T>
 T* load_bin(const std::string& path, size_t& out_count) {
@@ -33,9 +69,7 @@ T* load_bin(const std::string& path, size_t& out_count) {
 }
 
 int main(int argc, char** argv) {
-    // argv[1] = config file (optional), argv[2] = data directory (optional)
-    const std::string cfg_file = (argc > 1) ? argv[1] : "SOLVER_CONFIG.json";
-    const std::string data_dir = (argc > 2) ? argv[2] : "data";
+    const std::string data_dir = (argc > 1) ? argv[1] : "data";
 
     // ---- Init & callbacks ----
     AMGX_initialize();
@@ -43,7 +77,7 @@ int main(int argc, char** argv) {
 
     // ---- Config / resources / handles ----
     AMGX_config_handle cfg = nullptr;
-    AMGX_config_create_from_file(&cfg, cfg_file.c_str());
+    AMGX_config_create_from_file(&cfg, "amgx_config.json");
     AMGX_config_add_parameters(&cfg, "exception_handling=1");
 
     AMGX_resources_handle rsrc = nullptr;
@@ -66,10 +100,13 @@ int main(int argc, char** argv) {
     int*     h_row_ptr = nullptr;
     int*     h_col_ind = nullptr;
     double*  h_val     = nullptr;
+    double*  h_dinv     = nullptr;
+    
 
     size_t rhs_n = 0, row_ptr_n = 0, col_ind_n = 0, val_n = 0;
 
     h_rhs     = load_bin<double>(data_dir+"/rhs.bin",     rhs_n);
+    h_dinv     = load_bin<double>(data_dir+"/dinv.bin",     rhs_n);
     h_row_ptr = load_bin<int>   (data_dir+"/row_ptr.bin", row_ptr_n);
     h_col_ind = load_bin<int>   (data_dir+"/col_ind.bin", col_ind_n);
     h_val     = load_bin<double>(data_dir+"/val.bin",     val_n);
@@ -81,11 +118,13 @@ int main(int argc, char** argv) {
     int    *d_row_ptr = nullptr, *d_col_ind = nullptr;
     double *d_val     = nullptr, *d_rhs = nullptr;
     double *d_val_copy     = nullptr, *d_rhs_copy = nullptr;
+    double *d_dinv     = nullptr;
 
     cudaMalloc((void**)&d_row_ptr, row_ptr_n * sizeof(int));
     cudaMalloc((void**)&d_col_ind, col_ind_n * sizeof(int));
     cudaMalloc((void**)&d_val,     val_n     * sizeof(double));
     cudaMalloc((void**)&d_rhs,     rhs_n     * sizeof(double));
+    cudaMalloc((void**)&d_dinv,    rhs_n     * sizeof(double));
     cudaMalloc((void**)&d_val_copy,     val_n     * sizeof(double));
     cudaMalloc((void**)&d_rhs_copy,     rhs_n     * sizeof(double));
 
@@ -93,12 +132,18 @@ int main(int argc, char** argv) {
     cudaMemcpy(d_col_ind, h_col_ind, col_ind_n * sizeof(int),    cudaMemcpyHostToDevice);
     cudaMemcpy(d_val,     h_val,     val_n    * sizeof(double),  cudaMemcpyHostToDevice);
     cudaMemcpy(d_rhs,     h_rhs,     rhs_n    * sizeof(double),  cudaMemcpyHostToDevice);
-    cudaMemcpy(d_val_copy,     h_val,     val_n    * sizeof(double),  cudaMemcpyHostToDevice);
-    cudaMemcpy(d_rhs_copy,     h_rhs,     rhs_n    * sizeof(double),  cudaMemcpyHostToDevice);
+    cudaMemcpy(d_val_copy,h_val,     val_n    * sizeof(double),  cudaMemcpyHostToDevice);
+    cudaMemcpy(d_rhs_copy,h_rhs,     rhs_n    * sizeof(double),  cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dinv,    h_dinv,    rhs_n    * sizeof(double),  cudaMemcpyHostToDevice);
 
+    int threads = 256;
+    int blocks  = (n + threads - 1) / threads;
+    jacobi_preconditioning<<<blocks, threads>>>(n, d_row_ptr, d_col_ind, d_val, d_rhs, 1e-30);
+    cudaGetLastError();
+    cudaDeviceSynchronize();
 
     // ---- Upload matrix (with DEVICE pointers on purpose) ----
-    AMGX_RC rc_upload = AMGX_matrix_upload_all(
+    AMGX_matrix_upload_all(
         A, n, nnz, 1, 1,
         d_row_ptr,     // device pointer on purpose
         d_col_ind,     // device pointer on purpose
@@ -129,9 +174,18 @@ int main(int argc, char** argv) {
 
     AMGX_vector_set_zero(x, n, 1);
 
+    
     cudaDeviceSynchronize();
     auto start_setup = std::chrono::high_resolution_clock::now();
 
+    {
+        jacobi_preconditioning<<<blocks, threads>>>(n, d_row_ptr, 
+                                                       d_col_ind, 
+                                                       d_val_copy, 
+                                                       d_rhs_copy, 1e-30);
+        cudaGetLastError();
+        cudaDeviceSynchronize();
+    }
     AMGX_matrix_replace_coefficients(A,n,nnz,d_val_copy,NULL);
     AMGX_vector_upload(b, n, 1, d_rhs_copy);
     AMGX_solver_resetup(solver, A);
@@ -151,7 +205,7 @@ int main(int argc, char** argv) {
     std::cout << "Setup time: " << elapsed_setup.count() << " s\n";
     std::cout << "Solve time: " << elapsed_solve.count() << " s\n";
     std::cout << "Total time: " << elapsed_solve.count() + elapsed_setup.count() << " s\n";
-    
+
     // ---- Cleanup ----
     delete[] t_norm;
     delete[] h_rhs;
