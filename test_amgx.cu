@@ -10,7 +10,42 @@
 #include <cuda_runtime.h>
 #include <chrono>
 
-// ========================= Kernels =========================
+
+__global__ void shift_csr_indices_kernel(
+    int* row_ptr,
+    int* col_ind,
+    const int nnz,
+    const int ndim)
+{
+    // Handle row pointers
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < ndim + 1) {
+        row_ptr[tid]--;  // Shift row pointers
+    }
+
+    // Handle column indices
+    if (tid < nnz) {
+        col_ind[tid]--;  // Shift column indices
+    }
+}
+
+void shift_csr_matrix_to_0base_gpu(
+    int* row_ptr,
+    int* col_ind,
+    const int nnz,
+    const int ndim)
+{
+    // Calculate grid and block dimensions
+    const int block_size = 256;
+    const int num_blocks = (std::max(nnz, ndim + 1) + block_size - 1) / block_size;
+
+    // Launch kernel to shift indices
+    shift_csr_indices_kernel<<<num_blocks, block_size>>>(
+        row_ptr, col_ind, nnz, ndim);
+
+    // Synchronize to ensure the kernel has completed
+    cudaDeviceSynchronize();
+}
 
 // 1) Extract diagonal and its inverse: dinv[i] = 1/a_ii if |a_ii|>eps, else 1.0 (no scaling)
 __global__ void extract_diagonal_inverse(
@@ -102,13 +137,13 @@ int main(int argc, char** argv) {
     // Double values, 32-bit indices
     const AMGX_Mode mode = AMGX_mode_dDDI;
 
-    AMGX_matrix_handle A = nullptr;
-    AMGX_vector_handle b = nullptr, x = nullptr;
+    AMGX_matrix_handle A_mat = nullptr;
+    AMGX_vector_handle b_vec = nullptr, x_vec = nullptr;
     AMGX_solver_handle solver = nullptr;
 
-    AMGX_matrix_create(&A, rsrc, mode);
-    AMGX_vector_create(&b, rsrc, mode);
-    AMGX_vector_create(&x, rsrc, mode);
+    AMGX_matrix_create(&A_mat, rsrc, mode);
+    AMGX_vector_create(&b_vec, rsrc, mode);
+    AMGX_vector_create(&x_vec, rsrc, mode);
     AMGX_solver_create(&solver, rsrc, mode, cfg);
 
     // ---- Load RHS & CSR from binaries (host pointers) ----
@@ -151,7 +186,16 @@ int main(int argc, char** argv) {
     int threads = 256;
     int blocks  = (n + threads - 1) / threads;
 
-    // ---- Jacobi left scaling via 3 kernels on (d_val, d_rhs) ----
+
+    // Shift indices to 0-based indexing on GPU using the copies
+    shift_csr_matrix_to_0base_gpu(d_row_ptr, d_col_ind, nnz, n);
+
+
+    // // ---- Jacobi left scaling via 3 kernels on (d_val, d_rhs) ----
+    // shift_csr_indices_kernel<<<blocks, threads>>>(d_row_ptr, d_col_ind, nnz, n);
+    // cudaGetLastError();
+    // cudaDeviceSynchronize();
+
     extract_diagonal_inverse<<<blocks, threads>>>(n, d_row_ptr, d_col_ind, d_val, d_dinv, 1e-30);
     cudaGetLastError();
     cudaDeviceSynchronize();
@@ -166,7 +210,7 @@ int main(int argc, char** argv) {
 
     // ---- Upload matrix (with DEVICE pointers on purpose) ----
     AMGX_matrix_upload_all(
-        A, n, nnz, 1, 1,
+        A_mat, n, nnz, 1, 1,
         d_row_ptr,     // device pointer on purpose
         d_col_ind,     // device pointer on purpose
         d_val,         // device pointer on purpose (already scaled)
@@ -174,60 +218,33 @@ int main(int argc, char** argv) {
     );
 
     // ---- Create & upload vectors ----
-    AMGX_vector_bind(b, A);
-    AMGX_vector_bind(x, A);
-    AMGX_vector_upload(b, n, 1, d_rhs); // device pointer (scaled)
-    AMGX_vector_set_zero(x, n, 1);
+    AMGX_vector_bind(b_vec, A_mat);
+    AMGX_vector_bind(x_vec, A_mat);
+    AMGX_vector_upload(b_vec, n, 1, d_rhs); // device pointer (scaled)
+    AMGX_vector_set_zero(x_vec, n, 1);
 
     // ---- Initial residual norm
     double* t_norm = new double[1];
     std::fill(t_norm, t_norm + 1, 0.0);
-    AMGX_solver_calculate_residual_norm(solver, A, b, x, t_norm);
+    AMGX_solver_calculate_residual_norm(solver, A_mat, b_vec, x_vec, t_norm);
 
     // ---- Warmup Setup & Solve ----
-    AMGX_solver_setup(solver, A);
-    AMGX_solver_solve(solver, b, x);
+    AMGX_solver_setup(solver, A_mat);
+    AMGX_solver_solve(solver, b_vec, x_vec);
 
     // ---- Status & iterations ----
     AMGX_SOLVE_STATUS status;
     AMGX_solver_get_status(solver, &status);
-
-    AMGX_vector_set_zero(x, n, 1);
-
+        
+    // Copy solution to host with AMGX_vector_download
+    double* h_sol = new double[n];
+    AMGX_vector_download(x_vec, h_sol);   
     cudaDeviceSynchronize();
-    auto start_setup = std::chrono::high_resolution_clock::now();
-
-    // Recompute scaling on the *copy* (original values) then replace coefficients & rhs
-    extract_diagonal_inverse<<<blocks, threads>>>(n, d_row_ptr, d_col_ind, d_val_copy, d_dinv, 1e-30);
-    cudaGetLastError();
-    cudaDeviceSynchronize();
-
-    scale_matrix_rows_by_dinv<<<blocks, threads>>>(n, d_row_ptr, d_val_copy, d_dinv);
-    cudaGetLastError();
-    cudaDeviceSynchronize();
-
-    scale_rhs_by_dinv<<<blocks, threads>>>(n, d_rhs_copy, d_dinv);
-    cudaGetLastError();
-    cudaDeviceSynchronize();
-
-    AMGX_matrix_replace_coefficients(A, n, nnz, d_val_copy, NULL);
-    AMGX_vector_upload(b, n, 1, d_rhs_copy);
-    AMGX_solver_resetup(solver, A);
-
-    cudaDeviceSynchronize();
-    auto end_setup = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed_setup = end_setup - start_setup;
-
-    auto start_solve = std::chrono::high_resolution_clock::now();
-    AMGX_solver_solve(solver, b, x);
-    cudaDeviceSynchronize();
-    auto end_solve = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed_solve = end_solve - start_solve;
-
-    std::cout << "Setup time: " << elapsed_setup.count() << " s\n";
-    std::cout << "Solve time: " << elapsed_solve.count() << " s\n";
-    std::cout << "Total time: " << elapsed_solve.count() + elapsed_setup.count() << " s\n";
-
+    // Wrote solution to binary file
+    std::ofstream sol_file(data_dir + "/sol.bin", std::ios::binary);
+    sol_file.write(reinterpret_cast<char*>(h_sol), n * sizeof(double));
+    sol_file.close();
+    delete[] h_sol;
     // ---- Cleanup ----
     delete[] t_norm;
     delete[] h_rhs;
@@ -243,9 +260,9 @@ int main(int argc, char** argv) {
     cudaFree(d_rhs_copy);
     cudaFree(d_dinv);
 
-    AMGX_vector_destroy(x);
-    AMGX_vector_destroy(b);
-    AMGX_matrix_destroy(A);
+    AMGX_vector_destroy(x_vec);
+    AMGX_vector_destroy(b_vec);
+    AMGX_matrix_destroy(A_mat);
     AMGX_solver_destroy(solver);
     AMGX_resources_destroy(rsrc);
     AMGX_config_destroy(cfg);

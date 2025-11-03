@@ -24,11 +24,11 @@
         }, 
         "solver": "PBICGSTAB", 
         "print_solve_stats": 1, 
-        "obtain_timings": 0, 
+        "obtain_timings": 1, 
         "max_iters": 100, 
         "monitor_residual": 1,
         "store_res_history": 0, 
-        "convergence": "RELATIVE_INI", 
+        "convergence": "ABSOLUTE",
         "scope": "main", 
         "tolerance" : 1e-10, 
         "norm": "L2"
