@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
 
 
     // Shift indices to 0-based indexing on GPU using the copies
-    shift_csr_matrix_to_0base_gpu(d_row_ptr, d_col_ind, nnz, n);
+    // shift_csr_matrix_to_0base_gpu(d_row_ptr, d_col_ind, nnz, n);
 
 
     // // ---- Jacobi left scaling via 3 kernels on (d_val, d_rhs) ----
