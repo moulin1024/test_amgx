@@ -1,5 +1,6 @@
 {
     "config_version": 2, 
+    "communicator": "MPI_DIRECT",
     "solver": {
         "preconditioner": {
             "print_vis_data": 0, 
